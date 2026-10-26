@@ -1,5 +1,4 @@
 polars>=1.20
 scikit-learn
 numpy
-# Windows: для отчёта о памяти
 psutil; sys_platform == "win32"
