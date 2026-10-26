@@ -192,11 +192,13 @@ def load_part(
     sample: float = 1.0,
     *,
     sample_target: bool = False,
-) -> tuple[pl.DataFrame, pl.DataFrame]:
+    load_target: bool = True,
+) -> tuple[pl.DataFrame, pl.DataFrame | None]:
     """Event-level frames for the fitting part and the target, via config paths.
 
     ``sample`` draws a fraction of whole events from the part. Target is left
     complete unless ``sample_target`` is true, so ``metrics.evaluate`` can run.
+    ``load_target=False`` skips the target file (diag mode: stack AUCs only).
     """
     if mode not in {"val", "final"}:
         raise ValueError("mode must be 'val' or 'final'")
@@ -205,6 +207,8 @@ def load_part(
     else:
         part_path, target_path = C.TRAIN_PQ, C.EVAL_PQ
     part = _read_event_frame(part_path, sample)
+    if not load_target:
+        return part, None
     target = _read_event_frame(target_path, sample if sample_target else 1.0)
     return part, target
 

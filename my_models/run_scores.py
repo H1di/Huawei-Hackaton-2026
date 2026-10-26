@@ -20,6 +20,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from common import (  # noqa: E402
+    UNK_ID,
     EventTable,
     Vocab,
     load_part,
@@ -27,6 +28,9 @@ from common import (  # noqa: E402
     save_scores,
     split_by_time,
 )
+from dataset import to_tensors  # noqa: E402
+from mf import MFModel  # noqa: E402
+from item2vec import Item2VecModel  # noqa: E402
 
 try:
     import torch
@@ -133,7 +137,73 @@ class InHistModel:
 MODELS: dict[str, type] = {
     "popularity": PopularityModel,
     "inhist": InHistModel,
+    "mf": MFModel,
+    "item2vec": Item2VecModel,
 }
+
+
+def _stack_label_frame(events: EventTable) -> pl.DataFrame:
+    """rowid/event_id/clicked for metrics.evaluate on the stack window only."""
+    if events.labels is None:
+        raise ValueError("stack labels required for --diag")
+    return (
+        events.to_frame()
+        .select("event_id", "rowids", "labels")
+        .explode("rowids", "labels")
+        .rename({"rowids": "rowid", "labels": "clicked"})
+        .with_columns(pl.col("clicked").cast(pl.Int8))
+    )
+
+
+def run_diag(model_name: str, mode: str, sample: float) -> None:
+    """Fit model A on events < stack_start; after each epoch, AUC on the stack.
+
+    Stack rows are never used in that fit. The val/eval target is not loaded
+    and must not be used to pick EPOCHS.
+    """
+    from metrics import evaluate
+
+    if model_name not in MODELS:
+        raise SystemExit(f"unknown model {model_name!r}, have {sorted(MODELS)}")
+    w = load_windows(mode)
+    part_df, _ = load_part(mode, sample=sample, load_target=False)
+    part = EventTable.from_df(part_df)
+    del part_df
+    train_a = split_by_time(part, start=None, end=w["stack_start"])
+    stack = split_by_time(part, start=w["stack_start"], end=w["part_end"])
+    del part
+    if len(train_a) == 0 or len(stack) == 0:
+        raise RuntimeError("diag needs a non-empty train slice and stack window")
+
+    vocab = Vocab.fit(train_a)
+    stack_t = to_tensors(stack, vocab)
+    unk_share = float((stack_t.cand == UNK_ID).to(dtype=torch.float32).mean())
+    print(f"[diag] vocab {len(vocab)} | stack events {len(stack)} | "
+          f"stack UNK candidate share {unk_share:.4f}")
+
+    label_path = Path(__file__).resolve().parents[1] / "data" / "scores" / mode / "_diag_stack_labels.parquet"
+    label_path.parent.mkdir(parents=True, exist_ok=True)
+    _stack_label_frame(stack).write_parquet(label_path)
+
+    model = MODELS[model_name]()
+    score_col = f"{model.name}_score"
+
+    def _eval_stack(tag: str) -> None:
+        kwargs = {}
+        if isinstance(model, MFModel):
+            kwargs["tensors"] = stack_t
+        preds = model.score(stack, **kwargs).rename({score_col: "predicted_probability"})
+        print(f"[diag] {tag} ", end="")
+        evaluate(preds, val_path=label_path)
+
+    if isinstance(model, MFModel):
+        def on_epoch(epoch: int, fitted: MFModel, _loss: float) -> None:
+            _eval_stack(f"epoch {epoch + 1}/{fitted.cfg.EPOCHS} stack")
+
+        model.fit(train_a, on_epoch=on_epoch)
+    else:
+        model.fit(train_a)
+        _eval_stack("stack")
 
 
 def run(model_name: str, mode: str, sample: float) -> tuple[Path, Path]:
@@ -181,7 +251,15 @@ def main() -> None:
         default=1.0,
         help="fraction of PART events (whole events). Target is scored in full.",
     )
+    p.add_argument(
+        "--diag",
+        action="store_true",
+        help="fit model A only; print stack AUCs after each epoch (never uses the target).",
+    )
     args = p.parse_args()
+    if args.diag:
+        run_diag(args.model, args.mode, args.sample)
+        return
     run(args.model, args.mode, args.sample)
 
 

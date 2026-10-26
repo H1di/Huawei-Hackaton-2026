@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+import torch
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
@@ -29,6 +30,7 @@ from common import (  # noqa: E402
     split_by_time,
 )
 from dataset import to_tensors  # noqa: E402
+from mf import MFConfig, MFModel  # noqa: E402
 from run_scores import PopularityModel  # noqa: E402
 
 
@@ -179,6 +181,42 @@ def test_per_event_shape_is_10():
     # Left pad: known history occupies the tail.
     assert bool(batch.hist_mask[0, -2:].all())
     assert not bool(batch.hist_mask[0, :-2].any())
+
+
+def _tiny_mf(train: EventTable) -> MFModel:
+    m = MFModel(MFConfig(DIM=8, EPOCHS=1, BATCH_EVENTS=2, SEED=0))
+    m.fit(train)
+    return m
+
+
+def test_mf_empty_history_unk_rowids_and_zero_special():
+    ts = datetime(2025, 1, 20, tzinfo=timezone.utc)
+    train = _fit_base(ts)
+    m = _tiny_mf(train)
+
+    empty = _table([_event(
+        "empty", ts + timedelta(days=1),
+        history=[],
+        items=[f"i{k}" for k in range(N_CAND)],
+        labels=None,
+    )])
+    s_empty = m.score(empty)["mf_score"]
+    assert s_empty.null_count() == 0
+    assert np.isfinite(s_empty.to_numpy()).all()
+
+    unseen = [f"z{k}" for k in range(N_CAND)]
+    unk_ev = _table([_event("unk", ts, ["brand-new"], unseen, None)])
+    s_unk = m.score(unk_ev)["mf_score"]
+    assert np.isfinite(s_unk.to_numpy()).all()
+
+    got = m.score(train)["rowid"].to_list()
+    assert got == train.flat_rowids().to_list()
+
+    assert m.net is not None
+    for emb in (m.net.hist_emb, m.net.cand_emb, m.net.item_bias):
+        w = emb.weight.detach()
+        assert torch.allclose(w[0], torch.zeros_like(w[0]))
+        assert torch.allclose(w[1], torch.zeros_like(w[1]))
 
 
 if __name__ == "__main__":
