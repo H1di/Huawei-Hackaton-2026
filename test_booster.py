@@ -3,7 +3,8 @@
 Проверяет:
   1. признаки «кандидат на фоне события» считаются внутри своего события и не трогают метку;
   2. текстовые колонки кодируются одинаково в train и target;
-  3. LightGBM находит заложенный сигнал и выдаёт по прогнозу на каждую строку.
+  3. LightGBM находит заложенный сигнал и выдаёт по прогнозу на каждую строку;
+  4. tl2vec: история выравнивается вправо, пустая история / незнакомый товар дают 0, а не NaN.
 """
 import numpy as np
 import polars as pl
@@ -55,6 +56,25 @@ def test_booster_learns_signal():
     p = booster.predict(x)
     assert len(p) == target.height and np.isfinite(p).all()
     assert roc_auc_score(y, p) > 0.85, roc_auc_score(y, p)
+
+
+def test_tl2vec_history_and_edge_cases():
+    from gensim.models import Word2Vec
+    from tl2vec import Cfg, Embeddings, encode, features, hist_matrix
+
+    e = Embeddings(Word2Vec([["a", "b", "c"], ["b", "c", "d"]] * 20, vector_size=4, window=5,
+                            min_count=1, seed=0, workers=1))
+    ia, ib, ic = (e.lookup.filter(pl.col("item_id") == x)["i"].item() for x in "abc")
+    H = hist_matrix(pl.Series([["a", "b"], [], ["zzz", "c"]]), e)
+    assert H[0].tolist() == [e.unk] * 18 + [ia, ib]      # свежий клик в последней колонке
+    assert (H[1] == e.unk).all()                          # пустая история
+    assert H[2].tolist() == [e.unk] * 19 + [ic]           # незнакомый товар истории = пустое место
+
+    f = features(e, H, np.array([0, 1, 2]), encode(pl.Series(["c", "c", "zzz"]), e), Cfg(chunk_rows=2))
+    assert all(np.isfinite(v).all() for v in f.values())
+    assert f["score"][1] == f["max"][1] == f["decay"][1] == 0   # пустая история -> 0
+    assert f["score"][2] == f["vnorm"][2] == 0                   # незнакомый кандидат -> 0
+    assert abs(f["max"][0] - max(e.unit[ic] @ e.unit[ia], e.unit[ic] @ e.unit[ib])) < 1e-5
 
 
 if __name__ == "__main__":
