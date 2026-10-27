@@ -16,7 +16,7 @@ VAL_PQ = SPLIT_DIR / "val.parquet"
 
 # Всё до VAL_START -> fit, начиная с VAL_START -> валидационное окно.
 VAL_START = datetime(2025, 1, 25, tzinfo=timezone.utc)
-TRAIN_END = datetime(2025, 1, 28, tzinfo=timezone.utc)   # train = 20–27 янв включительно
+TRAIN_END = datetime(2025, 1, 27, tzinfo=timezone.utc)   # train = 20–26 янв включительно (cutoff 27.01 00:00, INSTRUCTIONS)
 
 # Скоры моделей (MF, item2vec, ко-клики, SASRec) нельзя посчитать «as-of» для каждой строки.
 # Поэтому: такая модель учится на событиях < stack_start, бустинг учится на строках
